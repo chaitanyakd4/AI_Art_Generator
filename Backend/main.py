@@ -1,115 +1,126 @@
-# -*- coding: utf-8 -*-
 import os
 import time
-import uuid
 import torch
-from diffusers import StableDiffusionPipeline
-from supabase import create_client, Client
 from dotenv import load_dotenv
+from diffusers import StableDiffusionPipeline
+from supabase import create_client
 
-# Load environment variables
-load_dotenv()
+# Configuration
+BUCKET_NAME = "generated-images"
+MODEL_ID = "stabilityai/stable-diffusion-2-1"
 
-# Initialize Supabase client
-supabase: Client = create_client(
-    os.getenv("SUPABASE_URL"),
-    os.getenv("SUPABASE_KEY")
-)
+def initialize_supabase():
+    """Initialize and verify Supabase connection"""
+    load_dotenv()
+    
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_KEY")
+    
+    if not supabase_url or not supabase_key:
+        raise ValueError("Missing Supabase credentials in .env file")
+    
+    return create_client(supabase_url, supabase_key)
 
-# Initialize Stable Diffusion
-model_id = "stabilityai/stable-diffusion-2-1"
-pipe = StableDiffusionPipeline.from_pretrained(
-    model_id,
-    torch_dtype=torch.float16,
-    revision="fp16"
-)
-pipe = pipe.to("cuda")
-pipe.enable_attention_slicing()  # Reduce memory usage
+def initialize_model():
+    """Initialize Stable Diffusion pipeline"""
+    return StableDiffusionPipeline.from_pretrained(
+        MODEL_ID,
+        torch_dtype=torch.float16,
+        variant="fp16",
+        safety_checker=None
+    ).to("cuda")
 
-def process_prompts():
-    """Continuously checks for new prompts and generates images"""
+def upload_to_storage(supabase, image, prompt_id):
+    """Handle image upload to Supabase Storage"""
+    image_path = f"temp_{prompt_id}.png"
+    try:
+        # Save image temporarily
+        image.save(image_path)
+        
+        # Upload with proper headers
+        with open(image_path, 'rb') as f:
+            res = supabase.storage.from_(BUCKET_NAME).upload(
+                file=f,
+                path=f"{prompt_id}.png",
+                file_options={
+                    'content-type': 'image/png',
+                    'x-upsert': 'true'  # String instead of boolean
+                }
+            )
+            
+            if isinstance(res, dict) and res.get('error'):
+                raise Exception(res['error'])
+        
+        # Get public URL
+        return supabase.storage.from_(BUCKET_NAME).get_public_url(f"{prompt_id}.png")
+        
+    finally:
+        if os.path.exists(image_path):
+            os.remove(image_path)
+
+def process_prompts(supabase, pipe):
+    """Main processing loop"""
     while True:
         try:
-            # Get pending prompts from database
-            response = supabase.table('prompts') \
+            # Get oldest pending prompt
+            res = supabase.table('prompts') \
                 .select('*') \
                 .eq('status', 'pending') \
-                .order('created_at', ascending=True) \
+                .order('created_at') \
                 .limit(1) \
                 .execute()
 
-            if not response.data:
-                print("No pending prompts found. Sleeping for 10 seconds...")
-                time.sleep(10)
+            if not res.data:
+                time.sleep(5)
                 continue
 
-            prompt = response.data[0]
-            print(f"Processing prompt ID: {prompt['id']} - {prompt['prompt_text']}")
+            prompt = res.data[0]
+            print(f"Processing: {prompt['id']} - {prompt['prompt_text']}")
 
-            # Update status to 'processing'
+            # Update status to processing
             supabase.table('prompts') \
                 .update({'status': 'processing'}) \
                 .eq('id', prompt['id']) \
                 .execute()
 
-            # Generate image
-            image = pipe(
-                prompt['prompt_text'],
-                num_inference_steps=50,
-                guidance_scale=7.5
-            ).images[0]
+            # Generate and upload image
+            image = pipe(prompt['prompt_text']).images[0]
+            image_url = upload_to_storage(supabase, image, prompt['id'])
 
-            # Save image temporarily
-            image_filename = f"temp_{uuid.uuid4().hex}.png"
-            image.save(image_filename)
+            # Update database records
+            supabase.table('generated_images').insert({
+                'prompt_id': prompt['id'],
+                'image_url': image_url,
+                'model_used': MODEL_ID
+            }).execute()
 
-            # Upload to Supabase Storage
-            with open(image_filename, 'rb') as f:
-                storage_response = supabase.storage() \
-                    .from_('generated-images') \
-                    .upload(f"{prompt['id']}.png", f)
-
-            # Get public URL
-            image_url = supabase.storage() \
-                .from_('generated-images') \
-                .get_public_url(f"{prompt['id']}.png")
-
-            # Store metadata in database
-            supabase.table('generated_images') \
-                .insert({
-                    'prompt_id': prompt['id'],
-                    'image_url': image_url,
-                    'model_used': model_id
-                }).execute()
-
-            # Update prompt status
             supabase.table('prompts') \
                 .update({'status': 'completed'}) \
                 .eq('id', prompt['id']) \
                 .execute()
 
-            # Clean up
-            os.remove(image_filename)
-            print(f"Completed processing for prompt ID: {prompt['id']}")
+            print(f"Completed: {prompt['id']}")
 
         except Exception as e:
             print(f"Error processing prompt: {str(e)}")
-            if 'id' in locals():
+            if 'prompt' in locals():
                 supabase.table('prompts') \
-                    .update({'status': 'failed', 'error': str(e)}) \
+                    .update({
+                        'status': 'failed',
+                        'error': str(e)[:500]  # Truncate long errors
+                    }) \
                     .eq('id', prompt['id']) \
                     .execute()
-            time.sleep(10)
+            time.sleep(5)
 
 if __name__ == "__main__":
-    # Create required storage bucket if not exists
     try:
-        supabase.storage().create_bucket("generated-images", {
-            'public': True,
-            'allowed_mime_types': ['image/png'],
-            'file_size_limit': 1024 * 1024 * 5  # 5MB limit
-        })
+        # Initialize services
+        sb = initialize_supabase()
+        model = initialize_model()
+        
+        print("Services initialized. Starting processing...")
+        process_prompts(sb, model)
+        
     except Exception as e:
-        print(f"Storage bucket already exists or error creating: {str(e)}")
-
-    process_prompts()
+        print(f"Fatal error: {str(e)}")

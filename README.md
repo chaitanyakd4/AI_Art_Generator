@@ -1,2 +1,0 @@
-# AI_Art_Generator
-NFT GENERATION OF IMAGES VIA AI
