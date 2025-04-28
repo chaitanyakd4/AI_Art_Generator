@@ -1,84 +1,59 @@
-"use client";
-
 import { useState } from "react";
-import axios from "axios";
 
-type GenerateResponse = {
-  image_url: string;
-  metadata_url: string;
-};
+interface PromptFormProps {
+  onSubmit: (prompt: string) => void;
+  isWalletConnected: boolean;
+}
 
-type PromptFormProps = {
-  onSubmit?: (prompt: string) => Promise<void>;
-};
-
-export default function PromptForm({ onSubmit }: PromptFormProps) {
+export default function PromptForm({ onSubmit, isWalletConnected }: PromptFormProps) {
   const [prompt, setPrompt] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [imageUrl, setImageUrl] = useState<string | null>(null);
-  const [metadataUrl, setMetadataUrl] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setLoading(true);
-    setError(null);
-    setImageUrl(null);
-    setMetadataUrl(null);
-
+    if (!prompt.trim()) return;
+    
     try {
-      if (onSubmit) {
-        await onSubmit(prompt); // optional external handler
-        return;
-      }
-
-      const res = await axios.post<GenerateResponse>("http://localhost:8000/generate", { prompt });
-      const data = res.data;
-      setImageUrl(data.image_url);
-      setMetadataUrl(data.metadata_url);
-    } catch (err) {
-      console.error(err);
-      setError("Something went wrong. Please try again.");
+      setIsSubmitting(true);
+      // Pass the prompt up to the parent component
+      onSubmit(prompt.trim());
+    } catch (error) {
+      console.error("❌ Error submitting prompt:", error);
     } finally {
-      setLoading(false);
+      setIsSubmitting(false);
     }
   };
 
   return (
-    <div>
-      <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-        <input
-          type="text"
+    <form onSubmit={handleSubmit} className="w-full">
+      <div className="relative">
+        <textarea
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
-          placeholder="Enter your prompt..."
-          className="p-2 rounded bg-gray-800 text-white"
+          placeholder="Describe your NFT artwork (e.g., 'A cosmic jellyfish floating through a nebula')"
+          className="w-full p-4 pr-24 bg-white/10 backdrop-blur-sm border border-purple-500/30 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500/50"
+          rows={4}
+          required
+          disabled={isSubmitting || !isWalletConnected}
         />
         <button
           type="submit"
-          className="bg-purple-600 hover:bg-purple-700 p-2 rounded text-white"
-          disabled={loading}
+          disabled={isSubmitting || !prompt.trim() || !isWalletConnected}
+          className={`absolute right-3 bottom-3 px-4 py-2 rounded-md font-medium transition-all ${
+            isSubmitting || !prompt.trim() || !isWalletConnected
+              ? "bg-gray-600 text-gray-400 cursor-not-allowed"
+              : "bg-purple-600 hover:bg-purple-700 text-white"
+          }`}
         >
-          {loading ? "Generating..." : "Generate Art"}
+          {isSubmitting ? "Creating..." : "Generate"}
         </button>
-      </form>
-
-      {error && <p className="text-red-500 mt-4">{error}</p>}
-
-      {imageUrl && (
-        <div className="mt-6">
-          <p className="text-green-400 mb-2">✅ Image generated:</p>
-          <img src={imageUrl} alt="Generated Art" className="rounded shadow-lg" />
-          {metadataUrl && (
-            <p className="mt-2 text-sm">
-              View Metadata:{" "}
-              <a href={metadataUrl} target="_blank" rel="noopener noreferrer" className="underline text-blue-400">
-                {metadataUrl}
-              </a>
-            </p>
-          )}
-        </div>
+      </div>
+      
+      {!isWalletConnected && (
+        <p className="mt-2 text-yellow-400 text-sm">
+          Please connect your wallet first to generate NFT art
+        </p>
       )}
-    </div>
+    </form>
   );
 }
